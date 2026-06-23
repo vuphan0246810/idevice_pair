@@ -20,7 +20,6 @@ use tokio::io::AsyncWriteExt;
 mod discover;
 mod mount;
 
-const RP_PAIRING_FILE_NAME: &str = "rp_pairing_file.plist";
 
 #[derive(Parser)]
 #[command(name = "idevice_pair")]
@@ -92,9 +91,11 @@ async fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
 
+    let (mut _usbmuxd_conn, usbmuxd_addr) = connect_to_usbmuxd().await?;
+
     match cli.command {
         Commands::List => {
-            let devices = get_all_devices().await?;
+            let devices = get_all_devices(usbmuxd_addr.clone()).await?;
             if devices.is_empty() {
                 println!("No devices found.");
             } else {
@@ -105,8 +106,8 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Pair { udid, remote, output } => {
-            let dev = get_device(udid).await?;
-            let provider = dev.to_provider(UsbmuxdAddr::default(), "idevice_pair");
+            let dev = get_device(udid, usbmuxd_addr.clone()).await?;
+            let provider = dev.to_provider(usbmuxd_addr.clone(), "idevice_pair");
             
             if remote {
                 println!("Starting Remote Pairing... Please trust the device if prompted.");
@@ -116,8 +117,7 @@ async fn main() -> Result<()> {
                 save_pairing_data(bytes, output, &format!("{}_remote.plist", dev.udid))?;
             } else {
                 println!("Starting Lockdown Pairing...");
-                let mut uc = connect_to_usbmuxd().await?;
-                let buid = uc.get_buid().await.context("Failed to get BUID")?;
+                                let buid = _usbmuxd_conn.get_buid().await.context("Failed to get BUID")?;
                 
                 let mut buid_chars: Vec<char> = buid.chars().collect();
                 if !buid_chars.is_empty() {
@@ -135,8 +135,8 @@ async fn main() -> Result<()> {
         Commands::Validate { file, ip, remote, udid } => {
             let data = std::fs::read(&file).context("Failed to read pairing file")?;
             if remote {
-                let dev = get_device(udid).await?;
-                let provider = dev.to_provider(UsbmuxdAddr::default(), "idevice_pair");
+                let dev = get_device(udid, usbmuxd_addr.clone()).await?;
+                let provider = dev.to_provider(usbmuxd_addr.clone(), "idevice_pair");
                 let mut pairing_file = RpPairingFile::from_bytes(&data).context("Invalid remote pairing file")?;
                 
                 println!("Validating Remote Pairing...");
@@ -159,8 +159,8 @@ async fn main() -> Result<()> {
             }
         }
         Commands::ListApps { udid } => {
-            let dev = get_device(udid).await?;
-            let provider = dev.to_provider(UsbmuxdAddr::default(), "idevice_pair");
+            let dev = get_device(udid, usbmuxd_addr.clone()).await?;
+            let provider = dev.to_provider(usbmuxd_addr.clone(), "idevice_pair");
             let mut ic = InstallationProxyClient::connect(&provider).await?;
             let apps = ic.get_apps(Some("User"), None).await?;
             
@@ -174,8 +174,8 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Install { udid, file, bundle_id, name } => {
-            let dev = get_device(udid).await?;
-            let provider = dev.to_provider(UsbmuxdAddr::default(), "idevice_pair");
+            let dev = get_device(udid, usbmuxd_addr.clone()).await?;
+            let provider = dev.to_provider(usbmuxd_addr.clone(), "idevice_pair");
             let data = std::fs::read(file).context("Failed to read pairing file")?;
             
             let hc = HouseArrestClient::connect(&provider).await?;
@@ -185,9 +185,9 @@ async fn main() -> Result<()> {
             println!("Successfully installed pairing file to {}/Documents/{}", bundle_id, name);
         }
         Commands::Mount { udid } => {
-            let dev = get_device(udid).await?;
+            let dev = get_device(udid, usbmuxd_addr.clone()).await?;
             println!("Mounting DDI to device {}...", dev.udid);
-            mount::auto_mount(dev).await.context("Failed to mount DDI")?;
+            mount::auto_mount(dev, usbmuxd_addr.clone()).await.context("Failed to mount DDI")?;
             println!("DDI mounted successfully.");
         }
     }
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn connect_to_usbmuxd() -> Result<UsbmuxdConnection> {
+async fn connect_to_usbmuxd() -> Result<(UsbmuxdConnection, UsbmuxdAddr)> {
     let socket_paths = [
         "/var/run/usbmuxd",
         "/data/data/com.termux/files/usr/var/run/usbmuxd",
@@ -207,7 +207,7 @@ async fn connect_to_usbmuxd() -> Result<UsbmuxdConnection> {
             println!("Attempting to connect to usbmuxd at: {}", path_str);
             let addr = UsbmuxdAddr::UnixSocket(path_str.to_string());
             match addr.connect(0).await {
-                Ok(conn) => return Ok(conn),
+                Ok(conn) => return Ok((conn, addr)),
                 Err(e) => {
                     eprintln!("Failed to connect to usbmuxd at {}: {}", path_str, e);
                 }
@@ -221,14 +221,14 @@ async fn connect_to_usbmuxd() -> Result<UsbmuxdConnection> {
     ))
 }
 
-async fn get_all_devices() -> Result<Vec<UsbmuxdDevice>> {
-    let mut uc = connect_to_usbmuxd().await?;
+async fn get_all_devices(usbmuxd_addr: UsbmuxdAddr) -> Result<Vec<UsbmuxdDevice>> {
+    let mut uc = usbmuxd_addr.connect(0).await?;
     let devs = uc.get_devices().await.context("Failed to get devices")?;
     Ok(devs.into_iter().filter(|x| x.connection_type == Connection::Usb).collect())
 }
 
-async fn get_device(udid: Option<String>) -> Result<UsbmuxdDevice> {
-    let devs = get_all_devices().await?;
+async fn get_device(udid: Option<String>, usbmuxd_addr: UsbmuxdAddr) -> Result<UsbmuxdDevice> {
+    let devs = get_all_devices(usbmuxd_addr).await?;
     if let Some(target_udid) = udid {
         let udid_upper = target_udid.to_uppercase();
         devs.into_iter().find(|d| d.udid.to_uppercase() == udid_upper)

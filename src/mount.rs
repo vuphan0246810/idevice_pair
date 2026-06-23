@@ -10,8 +10,8 @@ use idevice::{
 const BUILD_MANIFEST: &[u8] = include_bytes!("../DDI/BuildManifest.plist");
 const DDI_IMAGE: &[u8] = include_bytes!("../DDI/Image.dmg");
 const DDI_TRUSTCACHE: &[u8] = include_bytes!("../DDI/Image.dmg.trustcache");
-pub async fn auto_mount(dev: UsbmuxdDevice) -> Result<(), IdeviceError> {
-    let p = dev.to_provider(UsbmuxdAddr::default(), "idevice_pair");
+pub async fn auto_mount(dev: UsbmuxdDevice, usbmuxd_addr: UsbmuxdAddr) -> Result<(), IdeviceError> {
+    let p = dev.to_provider(usbmuxd_addr, "idevice_pair");
 
     let mut mc = ImageMounter::connect(&p).await?;
     let images = mc.copy_devices().await?;
