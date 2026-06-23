@@ -169,23 +169,22 @@ async fn main() -> Result<()> {
 }
 
 async fn get_all_devices() -> Result<Vec<UsbmuxdDevice>> {
-    // Thử tìm socket usbmuxd ở các vị trí phổ biến trên Android/Termux
     let paths = [
         "/var/run/usbmuxd",
         "/data/data/com.termux/files/usr/var/run/usbmuxd",
     ];
 
-    let mut provider = None;
+    let mut provider_opt = None;
     for path in paths {
         if std::path::Path::new(path).exists() {
             if let Ok(p) = IdeviceProvider::with_addr(UsbmuxdAddr::Unix(path.into())).await {
-                provider = Some(p);
+                provider_opt = Some(p);
                 break;
             }
         }
     }
 
-    let mut provider = match provider {
+    let mut provider = match provider_opt {
         Some(p) => p,
         None => {
             match IdeviceProvider::new().await {
@@ -201,11 +200,11 @@ async fn get_all_devices() -> Result<Vec<UsbmuxdDevice>> {
 
 async fn get_device(udid: Option<String>) -> Result<UsbmuxdDevice> {
     let devices = get_all_devices().await?;
-    if let Some(udid) = udid {
+    if let Some(udid_val) = udid {
         devices
             .into_iter()
-            .find(|d| d.udid == udid)
-            .ok_or_else(|| anyhow::anyhow!("Device with UDID {} not found", udid))
+            .find(|d| d.udid == udid_val)
+            .ok_or_else(|| anyhow::anyhow!("Device with UDID {} not found", udid_val))
     } else {
         devices
             .into_iter()
