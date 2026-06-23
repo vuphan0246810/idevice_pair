@@ -7,10 +7,10 @@ use idevice::{
     lockdown::LockdownClient,
     pairing_file::PairingFile,
     provider::IdeviceProvider,
-    remote_pairing::{RemotePairingClient, RpPairingFile},
+    remote_pairing::RemotePairingClient,
     rsd::RsdHandshake,
     usbmuxd::{UsbmuxdAddr, UsbmuxdDevice},
-    Idevice, IdeviceService, RemoteXpcClient,
+    Idevice, IdeviceService,
 };
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
@@ -106,10 +106,12 @@ async fn main() -> Result<()> {
         } => {
             let device = get_device(udid).await?;
             if remote {
+                // Remote pairing logic with idevice 0.1.61
                 let mut rsd = RsdHandshake::new(device.udid.clone()).await?;
                 rsd.handshake().await?;
-                let mut xpc = RemoteXpcClient::new(rsd).await?;
-                let mut client = RemotePairingClient::new(&mut xpc).await?;
+                // Note: In 0.1.61, RemotePairingClient might have different constructor
+                // Based on log, it needs 2 arguments: (inner, sending_host)
+                let mut client = RemotePairingClient::new(rsd, "manus-agent");
                 let pairing_file = client.get_pairing_file().await?;
                 let output = output.unwrap_or_else(|| PathBuf::from(RP_PAIRING_FILE_NAME));
                 pairing_file.save(&output)?;
