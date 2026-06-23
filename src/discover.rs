@@ -4,14 +4,11 @@ use futures_util::{StreamExt, pin_mut};
 use log::{debug, warn};
 use mdns::{Record, RecordKind};
 use std::{net::IpAddr, time::Duration};
-use tokio::sync::mpsc::UnboundedSender;
-
-use crate::IdeviceCommands;
 
 const SERVICE_NAME: &str = "apple-mobdev2";
 const SERVICE_PROTOCOL: &str = "tcp";
 
-pub async fn start_discover(sender: UnboundedSender<IdeviceCommands>) {
+pub async fn start_discover() {
     let service_name = format!("_{}._{}.local", SERVICE_NAME, SERVICE_PROTOCOL);
     println!("Starting mDNS discovery for {} with mdns", service_name);
 
@@ -34,7 +31,6 @@ pub async fn start_discover(sender: UnboundedSender<IdeviceCommands>) {
                 }
             }
 
-            // Look through paired devices for mac address
             let mac_addr = match mac_addr {
                 Some(m) => m,
                 None => {
@@ -44,12 +40,8 @@ pub async fn start_discover(sender: UnboundedSender<IdeviceCommands>) {
             };
 
             debug!("Discovered {mac_addr} at {addr}");
-            sender
-                .send(IdeviceCommands::DiscoveredDevice((
-                    addr,
-                    mac_addr.to_string(),
-                )))
-                .unwrap();
+            // In CLI we don't have a receiver for now, we just print or handle it
+            println!("Discovered device: {} at {}", mac_addr, addr);
         }
     }
 }

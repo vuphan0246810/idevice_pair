@@ -1,5 +1,3 @@
-// Jackson Coxson
-
 use reqwest::blocking::get;
 use std::fs;
 use std::path::Path;
@@ -17,13 +15,6 @@ const OUTPUT_FILES: [&str; 3] = [
 ];
 
 fn main() {
-    #[cfg(windows)]
-    {
-        let mut res = winres::WindowsResource::new();
-        res.set_icon("icon.ico");
-        res.compile().unwrap();
-    }
-
     println!("cargo:rerun-if-changed=build.rs");
     for file in OUTPUT_FILES {
         println!("cargo:rerun-if-changed={file}");
