@@ -1,7 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use idevice::{
-    Idevice, IdeviceService,
     core_device_proxy::CoreDeviceProxy,
     house_arrest::HouseArrestClient,
     installation_proxy::InstallationProxyClient,
@@ -11,7 +10,7 @@ use idevice::{
     remote_pairing::{RemotePairingClient, RpPairingFile},
     rsd::RsdHandshake,
     usbmuxd::{Connection, UsbmuxdAddr, UsbmuxdConnection, UsbmuxdDevice},
-    RemoteXpcClient,
+    Idevice, IdeviceService, RemoteXpcClient,
 };
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -33,8 +32,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// List connected iOS devices
+    #[command(alias = "l")]
     List,
     /// Pair with a device (Lockdown or Remote)
+    #[command(alias = "p")]
     Pair {
         /// UDID of the device (if not provided, uses the first one found)
         #[arg(short, long)]
@@ -48,32 +49,25 @@ enum Commands {
     },
     /// Validate an existing pairing record
     Validate {
-        /// Path to the pairing file (.plist)
-        #[arg(short, long)]
-        file: PathBuf,
-        /// IP address of the device (for network validation)
-        #[arg(short, long)]
-        ip: Option<IpAddr>,
-        /// Use Remote Pairing validation
-        #[arg(short, long)]
-        remote: bool,
-        /// UDID of the device (required for remote validation)
+        /// UDID of the device (if not provided, uses the first one found)
         #[arg(short, long)]
         udid: Option<String>,
     },
     /// List installed apps on the device
     ListApps {
+        /// UDID of the device (if not provided, uses the first one found)
         #[arg(short, long)]
         udid: Option<String>,
     },
     /// Install a pairing file to a specific app's Documents folder
     Install {
+        /// UDID of the device (if not provided, uses the first one found)
         #[arg(short, long)]
         udid: Option<String>,
-        /// Path to the pairing file to install
+        /// Path to the pairing file
         #[arg(short, long)]
-        file: PathBuf,
-        /// Bundle ID of the target app
+        path: PathBuf,
+        /// Bundle ID of the app
         #[arg(short, long)]
         bundle_id: String,
         /// Filename in the app's Documents folder
@@ -81,7 +75,9 @@ enum Commands {
         name: String,
     },
     /// Mount Developer Disk Image (DDI)
+    #[command(alias = "m")]
     Mount {
+        /// UDID of the device (if not provided, uses the first one found)
         #[arg(short, long)]
         udid: Option<String>,
     },
@@ -96,99 +92,77 @@ async fn main() -> Result<()> {
         Commands::List => {
             let devices = get_all_devices().await?;
             if devices.is_empty() {
-                println!("No devices found.");
-            } else {
-                println!("{:<40} {:<15} {:<10}", "UDID", "Type", "ID");
-                for dev in devices {
-                    println!("{:<40} {:<15} {:<10}", dev.udid, format!("{:?}", dev.connection_type), dev.device_id);
-                }
+                println!("No devices found");
+                return Ok(());
+            }
+            println!("Connected devices:");
+            for device in devices {
+                println!("- {}", device.udid);
             }
         }
-        Commands::Pair { udid, remote, output } => {
-            let dev = get_device(udid).await?;
-            let provider = dev.to_provider(UsbmuxdAddr::default(), "idevice_pair");
-            
+        Commands::Pair {
+            udid,
+            remote,
+            output,
+        } => {
+            let device = get_device(udid).await?;
             if remote {
-                println!("Starting Remote Pairing... Please trust the device if prompted.");
-                let hostname = pairing_hostname();
-                let pairing_file = generate_remote_pairing_file(&provider, &hostname).await?;
-                let bytes = pairing_file.to_bytes();
-                save_pairing_data(bytes, output, &format!("{}_remote.plist", dev.udid))?;
+                let mut rsd = RsdHandshake::new(device.udid.clone()).await?;
+                rsd.handshake().await?;
+                let mut xpc = RemoteXpcClient::new(rsd).await?;
+                let mut client = RemotePairingClient::new(&mut xpc).await?;
+                let pairing_file = client.get_pairing_file().await?;
+                let output = output.unwrap_or_else(|| PathBuf::from(RP_PAIRING_FILE_NAME));
+                pairing_file.save(&output)?;
+                println!("Pairing file saved to {:?}", output);
             } else {
-                println!("Starting Lockdown Pairing...");
-                let mut uc = UsbmuxdConnection::default().await.context("Failed to connect to usbmuxd")?;
-                let buid = uc.get_buid().await.context("Failed to get BUID")?;
-                
-                let mut buid_chars: Vec<char> = buid.chars().collect();
-                if !buid_chars.is_empty() {
-                    buid_chars[0] = if buid_chars[0] == 'F' { 'A' } else { 'F' };
-                }
-                let buid: String = buid_chars.into_iter().collect();
-                
-                let mut lc = LockdownClient::connect(&provider).await.context("Failed to connect to Lockdown")?;
-                let id = uuid::Uuid::new_v4().to_string().to_uppercase();
-                let pairing_file = lc.pair(id, buid, None).await.context("Pairing failed")?;
-                let bytes = pairing_file.serialize().context("Failed to serialize pairing file")?;
-                save_pairing_data(bytes, output, &format!("{}.plist", dev.udid))?;
+                let mut lockdown = LockdownClient::new(device).await?;
+                lockdown.pair().await?;
+                println!("Successfully paired with device");
             }
         }
-        Commands::Validate { file, ip, remote, udid } => {
-            let data = std::fs::read(&file).context("Failed to read pairing file")?;
-            if remote {
-                let dev = get_device(udid).await?;
-                let provider = dev.to_provider(UsbmuxdAddr::default(), "idevice_pair");
-                let mut pairing_file = RpPairingFile::from_bytes(&data).context("Invalid remote pairing file")?;
-                
-                println!("Validating Remote Pairing...");
-                validate_remote(&provider, &mut pairing_file).await?;
-                println!("Remote Pairing is VALID.");
-            } else {
-                let pairing_file = PairingFile::from_bytes(&data).context("Invalid lockdown pairing file")?;
-                let target_ip = match ip {
-                    Some(i) => i,
-                    None => {
-                        anyhow::bail!("IP address is required for lockdown validation over network.");
-                    }
-                };
-                
-                let stream = tokio::net::TcpStream::connect(SocketAddr::new(target_ip, 62078)).await
-                    .context("Failed to connect to device over network")?;
-                let mut lc = LockdownClient::new(Idevice::new(Box::new(stream), "idevice_pair"));
-                lc.start_session(&pairing_file).await.context("Validation failed")?;
-                println!("Lockdown Pairing is VALID.");
-            }
+        Commands::Validate { udid } => {
+            let device = get_device(udid).await?;
+            let mut lockdown = LockdownClient::new(device).await?;
+            lockdown.validate_pairing().await?;
+            println!("Pairing record is valid");
         }
         Commands::ListApps { udid } => {
-            let dev = get_device(udid).await?;
-            let provider = dev.to_provider(UsbmuxdAddr::default(), "idevice_pair");
-            let mut ic = InstallationProxyClient::connect(&provider).await?;
-            let apps = ic.get_apps(Some("User"), None).await?;
-            
-            println!("{:<50} {:<30}", "Bundle ID", "Name");
-            for (bid, app) in apps {
-                let name = app.as_dictionary()
-                    .and_then(|d| d.get("CFBundleDisplayName"))
-                    .and_then(|v| v.as_string())
-                    .unwrap_or("Unknown");
-                println!("{:<50} {:<30}", bid, name);
+            let device = get_device(udid).await?;
+            let mut lockdown = LockdownClient::new(device).await?;
+            let service = lockdown
+                .start_service("com.apple.mobile.installation_proxy")
+                .await?;
+            let mut client = InstallationProxyClient::new(service).await?;
+            let apps = client.browse_apps().await?;
+            println!("Installed apps:");
+            for app in apps {
+                println!("- {} ({})", app.bundle_identifier, app.bundle_name);
             }
         }
-        Commands::Install { udid, file, bundle_id, name } => {
-            let dev = get_device(udid).await?;
-            let provider = dev.to_provider(UsbmuxdAddr::default(), "idevice_pair");
-            let data = std::fs::read(file).context("Failed to read pairing file")?;
-            
-            let hc = HouseArrestClient::connect(&provider).await?;
-            let mut ac = hc.vend_documents(bundle_id.clone()).await?;
-            let mut f = ac.open(format!("/Documents/{}", name), idevice::afc::opcode::AfcFopenMode::Wr).await?;
-            f.write_all(&data).await.context("Failed to write file to device")?;
-            println!("Successfully installed pairing file to {}/Documents/{}", bundle_id, name);
+        Commands::Install {
+            udid,
+            path,
+            bundle_id,
+            name,
+        } => {
+            let device = get_device(udid).await?;
+            let mut lockdown = LockdownClient::new(device).await?;
+            let service = lockdown.start_service("com.apple.mobile.house_arrest").await?;
+            let mut client = HouseArrestClient::new(service).await?;
+            client.vend_container(&bundle_id).await?;
+            let mut afc = client.start_afc().await?;
+            let mut file = tokio::fs::File::open(path).await?;
+            let mut contents = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut file, &mut contents).await?;
+            let mut remote_file = afc.file_open(&format!("Documents/{}", name), "wb").await?;
+            remote_file.write_all(&contents).await?;
+            println!("Successfully installed pairing file to {}", bundle_id);
         }
         Commands::Mount { udid } => {
-            let dev = get_device(udid).await?;
-            println!("Mounting DDI to device {}...", dev.udid);
-            mount::auto_mount(dev).await.context("Failed to mount DDI")?;
-            println!("DDI mounted successfully.");
+            let device = get_device(udid).await?;
+            mount::mount_ddi(device).await?;
+            println!("Successfully mounted DDI");
         }
     }
 
@@ -196,79 +170,44 @@ async fn main() -> Result<()> {
 }
 
 async fn get_all_devices() -> Result<Vec<UsbmuxdDevice>> {
-    let mut uc = UsbmuxdConnection::default().await.context("Failed to connect to usbmuxd")?;
-    let devs = uc.get_devices().await.context("Failed to get devices")?;
-    Ok(devs.into_iter().filter(|x| x.connection_type == Connection::Usb).collect())
+    // Thử tìm socket usbmuxd ở các vị trí phổ biến trên Android/Termux
+    let paths = [
+        "/var/run/usbmuxd",
+        "/data/data/com.termux/files/usr/var/run/usbmuxd",
+    ];
+
+    let mut provider = None;
+    for path in paths {
+        if std::path::Path::new(path).exists() {
+            if let Ok(p) = IdeviceProvider::with_addr(UsbmuxdAddr::Unix(path.into())).await {
+                provider = Some(p);
+                break;
+            }
+        }
+    }
+
+    let mut provider = match provider {
+        Some(p) => p,
+        None => IdeviceProvider::new().await.map_err(|e| {
+            anyhow::anyhow!("Failed to connect to usbmuxd. Please ensure 'sudo usbmuxd' is running. Error: {}", e)
+        })?,
+    };
+
+    let devices = provider.get_devices().await?;
+    Ok(devices)
 }
 
 async fn get_device(udid: Option<String>) -> Result<UsbmuxdDevice> {
-    let devs = get_all_devices().await?;
-    if let Some(target_udid) = udid {
-        let udid_upper = target_udid.to_uppercase();
-        devs.into_iter().find(|d| d.udid.to_uppercase() == udid_upper)
-            .context(format!("Device with UDID {} not found", target_udid))
+    let devices = get_all_devices().await?;
+    if let Some(udid) = udid {
+        devices
+            .into_iter()
+            .find(|d| d.udid == udid)
+            .ok_or_else(|| anyhow::anyhow!("Device with UDID {} not found", udid))
     } else {
-        devs.into_iter().next().context("No iOS devices found via USB")
+        devices
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No devices found"))
     }
-}
-
-fn pairing_hostname() -> String {
-    let suffix: String = uuid::Uuid::new_v4().simple().to_string().chars().take(6).collect();
-    format!("idevice_pair-cli-{suffix}")
-}
-
-async fn generate_remote_pairing_file(
-    provider: &dyn IdeviceProvider,
-    hostname: &str,
-) -> Result<RpPairingFile> {
-    let proxy = CoreDeviceProxy::connect(provider).await?;
-    let rsd_port = proxy.tunnel_info().server_rsd_port;
-    let adapter = proxy.create_software_tunnel()?;
-    let mut adapter = adapter.to_async_handle();
-
-    let rsd_stream = adapter.connect(rsd_port).await?;
-    let handshake = RsdHandshake::new(rsd_stream).await?;
-    let tunnel_service = handshake.services.get("com.apple.internal.dt.coredevice.untrusted.tunnelservice")
-        .context("Untrusted tunnel service not found")?;
-
-    let ts_stream = adapter.connect(tunnel_service.port).await?;
-    let mut remote_xpc = RemoteXpcClient::new(ts_stream).await?;
-    remote_xpc.do_handshake().await?;
-    let _ = remote_xpc.recv_root().await;
-
-    let mut pairing_file = RpPairingFile::generate(hostname);
-    let mut pairing_client = RemotePairingClient::new(remote_xpc, hostname);
-    pairing_client.connect(&mut pairing_file, || async { "000000".to_string() }).await?;
-
-    Ok(pairing_file)
-}
-
-async fn validate_remote(provider: &dyn IdeviceProvider, pairing_file: &mut RpPairingFile) -> Result<()> {
-    let proxy = CoreDeviceProxy::connect(provider).await?;
-    let rsd_port = proxy.tunnel_info().server_rsd_port;
-    let adapter = proxy.create_software_tunnel()?;
-    let mut adapter = adapter.to_async_handle();
-
-    let rsd_stream = adapter.connect(rsd_port).await?;
-    let handshake = RsdHandshake::new(rsd_stream).await?;
-    let tunnel_service = handshake.services.get("com.apple.internal.dt.coredevice.untrusted.tunnelservice")
-        .context("Untrusted tunnel service not found")?;
-
-    let ts_stream = adapter.connect(tunnel_service.port).await?;
-    let mut conn = RemoteXpcClient::new(ts_stream).await?;
-    conn.do_handshake().await?;
-    let _ = conn.recv_root().await;
-
-    let hostname = pairing_hostname();
-    let mut rpc = RemotePairingClient::new(conn, &hostname);
-    let _ = rpc.attempt_pair_verify().await?;
-    rpc.validate_pairing(pairing_file).await.context("Validation failed")?;
-    Ok(())
-}
-
-fn save_pairing_data(data: Vec<u8>, output: Option<PathBuf>, default_name: &str) -> Result<()> {
-    let path = output.unwrap_or_else(|| PathBuf::from(default_name));
-    std::fs::write(&path, data).context(format!("Failed to write pairing file to {:?}", path))?;
-    println!("Pairing file saved to: {:?}", path);
-    Ok(())
 }
