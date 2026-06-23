@@ -30,10 +30,8 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Install Build Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+      - name: Install Cross
+        run: cargo install cross --git https://github.com/cross-rs/cross.git
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -42,14 +40,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: static-aarch64-musl-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: static-aarch64-musl-cross-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build Static Binary
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
+      - name: Build Static Binary with Cross
         run: |
-          cargo build --release --bin ${{ env.BINARY_NAME }} --target aarch64-unknown-linux-musl
+          cross build --release --bin ${{ env.BINARY_NAME }} --target aarch64-unknown-linux-musl
 
       - name: Prepare artifact
         run: |
