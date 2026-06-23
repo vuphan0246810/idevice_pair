@@ -128,8 +128,9 @@ async fn main() -> Result<()> {
                 let mut lc = LockdownClient::connect(&provider).await.context("Failed to connect to Lockdown")?;
                 let id = uuid::Uuid::new_v4().to_string().to_uppercase();
                 let pairing_file = lc.pair(id, buid, None).await.context("Pairing failed")?;
-                let bytes = pairing_file.serialize().context("Failed to serialize pairing file")?;
-                save_pairing_data(bytes, output, &format!("{}.plist", dev.udid))?;
+                let serialized_pairing_file = pairing_file.serialize().context("Failed to serialize pairing file")?;
+                _usbmuxd_conn.save_pair_record(&dev.udid, serialized_pairing_file.clone()).await.context("Failed to save pair record to usbmuxd")?;
+                save_pairing_data(serialized_pairing_file, output, &format!("{}.plist", dev.udid))?;
             }
         }
         Commands::Validate { file, ip, remote, udid } => {
@@ -175,13 +176,19 @@ async fn main() -> Result<()> {
         }
         Commands::Install { udid, file, bundle_id, name } => {
             let dev = get_device(udid, usbmuxd_addr.clone()).await?;
-            let provider = dev.to_provider(usbmuxd_addr.clone(), "idevice_pair");
-            let data = std::fs::read(file).context("Failed to read pairing file")?;
+            let pairing_file_data = std::fs::read(&file).context("Failed to read pairing file")?;
+            let pairing_file = PairingFile::from_bytes(&pairing_file_data).context("Failed to parse pairing file")?;
+
+            let usbmuxd_provider = dev.to_provider(usbmuxd_addr.clone(), "idevice_pair");
+            let custom_provider = CustomUsbmuxdProvider {
+                inner: usbmuxd_provider,
+                pairing_file,
+            };
             
-            let hc = HouseArrestClient::connect(&provider).await?;
+            let hc = HouseArrestClient::connect(&custom_provider).await?;
             let mut ac = hc.vend_documents(bundle_id.clone()).await?;
             let mut f = ac.open(format!("/Documents/{}", name), idevice::afc::opcode::AfcFopenMode::Wr).await?;
-            f.write_all(&data).await.context("Failed to write file to device")?;
+            f.write_all(&pairing_file_data).await.context("Failed to write file to device")?;
             println!("Successfully installed pairing file to {}/Documents/{}", bundle_id, name);
         }
         Commands::Mount { udid } => {
@@ -290,6 +297,32 @@ async fn validate_remote(provider: &dyn IdeviceProvider, pairing_file: &mut RpPa
     let _ = rpc.attempt_pair_verify().await?;
     rpc.validate_pairing(pairing_file).await.context("Validation failed")?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct CustomUsbmuxdProvider {
+    inner: idevice::provider::UsbmuxdProvider,
+    pairing_file: idevice::pairing_file::PairingFile,
+}
+
+impl idevice::provider::IdeviceProvider for CustomUsbmuxdProvider {
+    fn connect(
+        &self,
+        port: u16,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<idevice::Idevice, idevice::IdeviceError>> + Send>> {
+        self.inner.connect(port)
+    }
+
+    fn label(&self) -> &str {
+        self.inner.label()
+    }
+
+    fn get_pairing_file(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<idevice::pairing_file::PairingFile, idevice::IdeviceError>> + Send>> {
+        let pairing_file = self.pairing_file.clone();
+        Box::pin(async move { Ok(pairing_file) })
+    }
 }
 
 fn save_pairing_data(data: Vec<u8>, output: Option<PathBuf>, default_name: &str) -> Result<()> {
