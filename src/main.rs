@@ -14,7 +14,7 @@ use idevice::{
     RemoteXpcClient,
 };
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
 mod discover;
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
                 save_pairing_data(bytes, output, &format!("{}_remote.plist", dev.udid))?;
             } else {
                 println!("Starting Lockdown Pairing...");
-                let mut uc = UsbmuxdConnection::default().await.context("Failed to connect to usbmuxd")?;
+                let mut uc = connect_to_usbmuxd().await?;
                 let buid = uc.get_buid().await.context("Failed to get BUID")?;
                 
                 let mut buid_chars: Vec<char> = buid.chars().collect();
@@ -195,8 +195,34 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn connect_to_usbmuxd() -> Result<UsbmuxdConnection> {
+    let socket_paths = [
+        "/var/run/usbmuxd",
+        "/data/data/com.termux/files/usr/var/run/usbmuxd",
+    ];
+
+    for path_str in &socket_paths {
+        let path = Path::new(path_str);
+        if path.exists() {
+            println!("Attempting to connect to usbmuxd at: {}", path_str);
+            let addr = UsbmuxdAddr::UnixSocket(path_str.to_string());
+            match addr.connect(0).await {
+                Ok(conn) => return Ok(conn),
+                Err(e) => {
+                    eprintln!("Failed to connect to usbmuxd at {}: {}", path_str, e);
+                }
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Failed to connect to usbmuxd. Please ensure usbmuxd is running.\n\n
+        You might need to start it manually, e.g., by running 'sudo usbmuxd' or 'usbmuxd' in Termux."
+    ))
+}
+
 async fn get_all_devices() -> Result<Vec<UsbmuxdDevice>> {
-    let mut uc = UsbmuxdConnection::default().await.context("Failed to connect to usbmuxd")?;
+    let mut uc = connect_to_usbmuxd().await?;
     let devs = uc.get_devices().await.context("Failed to get devices")?;
     Ok(devs.into_iter().filter(|x| x.connection_type == Connection::Usb).collect())
 }
