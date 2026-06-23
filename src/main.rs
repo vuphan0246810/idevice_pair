@@ -188,9 +188,12 @@ async fn get_all_devices() -> Result<Vec<UsbmuxdDevice>> {
 
     let mut provider = match provider {
         Some(p) => p,
-        None => IdeviceProvider::new().await.map_err(|e| {
-            anyhow::anyhow!("Failed to connect to usbmuxd. Please ensure 'sudo usbmuxd' is running. Error: {}", e)
-        })?,
+        None => {
+            match IdeviceProvider::new().await {
+                Ok(p) => p,
+                Err(e) => return Err(anyhow::anyhow!("Failed to connect to usbmuxd. Please ensure 'sudo usbmuxd' is running. Error: {}", e)),
+            }
+        }
     };
 
     let devices = provider.get_devices().await?;
