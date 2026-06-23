@@ -9,10 +9,9 @@ use idevice::{
     provider::IdeviceProvider,
     remote_pairing::{RemotePairingClient, RpPairingFile},
     rsd::RsdHandshake,
-    usbmuxd::{Connection, UsbmuxdAddr, UsbmuxdConnection, UsbmuxdDevice},
+    usbmuxd::{UsbmuxdAddr, UsbmuxdDevice},
     Idevice, IdeviceService, RemoteXpcClient,
 };
-use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
